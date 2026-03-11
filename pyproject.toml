@@ -1,0 +1,19 @@
+[project]
+name = "droid-sam3-annotator"
+version = "0.1.0"
+description = "DROID SAM3 视频分割标注工具"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.7.0",
+    "torchvision",
+    "setuptools<81",
+    "sam3 @ git+https://github.com/facebookresearch/sam3.git",
+    "einops",
+    "psutil",
+    "scipy",
+    "decord",
+    "pycocotools",
+    "gradio>=5.0",
+    "numpy",
+    "Pillow",
+]
