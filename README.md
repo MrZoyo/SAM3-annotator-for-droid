@@ -92,6 +92,25 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
 注意：首次下载 `facebook/sam3` 权重前，需要先完成 Hugging Face 登录。
 如果你已经提前下载好了 `sam3.pt`，可以在运行时通过 `SAM3_CHECKPOINT_PATH` 指向本地权重。
 
+### Hugging Face 用法
+
+```bash
+# 登录（首次使用前执行）
+hf auth login
+
+# 查看当前登录态
+hf auth whoami
+
+# 已登录后可预下载权重到仓库本地
+hf download facebook/sam3 config.json sam3.pt --local-dir checkpoints
+```
+
+如果你已经把权重下载到 `checkpoints/sam3.pt`，推荐启动时显式指定：
+
+```bash
+SAM3_CHECKPOINT_PATH=/data1/zoyo/projects/SAM3-annotator-for-droid/checkpoints/sam3.pt
+```
+
 ### 运行
 
 ```bash
@@ -99,6 +118,7 @@ CUDA_HOME=/usr/local/cuda-12.8 \
 PATH="/usr/local/cuda-12.8/bin:$PATH" \
 LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 DROID_DATASET_ROOT=/data1/zoyo/projects/droid_test1/test1 \
+SAM3_CHECKPOINT_PATH=/data1/zoyo/projects/SAM3-annotator-for-droid/checkpoints/sam3.pt \
 .venv/bin/python app.py
 ```
 

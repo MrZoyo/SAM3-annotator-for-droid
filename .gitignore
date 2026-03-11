@@ -13,6 +13,9 @@ build/
 # UV lock file (large, auto-generated)
 uv.lock
 
+# Local model weights
+checkpoints/
+
 # IDE
 .idea/
 .vscode/
