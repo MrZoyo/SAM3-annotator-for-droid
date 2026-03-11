@@ -51,27 +51,63 @@ droid_sam3_annotator/
 
 ### 前置要求
 
-- Python >= 3.12
+- Python 3.12
 - CUDA GPU（SAM3 需要 ~7GB 显存）
+- 已安装 CUDA Toolkit（本机推荐 `/usr/local/cuda-12.8`）
 - ffmpeg（用于视频预览生成）
 - UV 包管理器
 
 ### 安装
 
 ```bash
-cd droid_sam3_annotator
-uv sync  # 自动创建虚拟环境并安装依赖
+cd /data1/zoyo/projects/SAM3-annotator-for-droid
+
+# 1) 用 uv 创建 Python 3.12 虚拟环境
+env UV_CACHE_DIR=/tmp/uv-cache uv venv --clear .venv --python 3.12
+
+# 2) 给 .venv 补 pip
+.venv/bin/python -m ensurepip --upgrade
+
+# 3) 显式指定 CUDA 路径，安装 PyTorch cu128 轮子
+CUDA_HOME=/usr/local/cuda-12.8 \
+PATH="/usr/local/cuda-12.8/bin:$PATH" \
+LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+.venv/bin/python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
+  torch==2.9.1 torchvision==0.24.1
+
+# 4) 安装其余依赖
+CUDA_HOME=/usr/local/cuda-12.8 \
+PATH="/usr/local/cuda-12.8/bin:$PATH" \
+LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
+.venv/bin/python -m pip install \
+  "setuptools<81" \
+  "sam3 @ git+https://github.com/facebookresearch/sam3.git" \
+  einops psutil scipy decord pycocotools \
+  "gradio>=5.0,<6.0" "numpy>=1.26,<2" Pillow
 ```
 
-首次运行会从 HuggingFace 下载 SAM3 模型权重（~3.5GB）。
+首次运行会从 HuggingFace 下载 SAM3 模型权重（`facebook/sam3`，约 3.5GB）。
+注意：首次下载 `facebook/sam3` 权重前，需要先完成 Hugging Face 登录。
+如果你已经提前下载好了 `sam3.pt`，可以在运行时通过 `SAM3_CHECKPOINT_PATH` 指向本地权重。
 
 ### 运行
 
 ```bash
-uv run python app.py
+CUDA_HOME=/usr/local/cuda-12.8 \
+PATH="/usr/local/cuda-12.8/bin:$PATH" \
+LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+DROID_DATASET_ROOT=/data1/zoyo/projects/droid_test1/test1 \
+.venv/bin/python app.py
 ```
 
 启动时会预加载 SAM3 模型（避免标注时等待），加载完成后访问 http://localhost:7860
+
+可选环境变量：
+
+- `DROID_DATASET_ROOT`：覆盖默认数据集根目录；当前默认值为 `/data1/zoyo/projects/droid_test1/test1`
+- `SAM3_CHECKPOINT_PATH`：指定本地 `sam3.pt` 路径，跳过默认权重下载流程
 
 ## 数据集格式
 

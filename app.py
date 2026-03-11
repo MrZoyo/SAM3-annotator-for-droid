@@ -1,5 +1,6 @@
 """DROID SAM3 视频分割标注工具 - Gradio 主应用。"""
 
+import os
 import threading
 
 import gradio as gr
@@ -29,10 +30,14 @@ from sam3_backend import SAM3Annotator
 
 # ── 全局状态 ──────────────────────────────────────────────────────────────────
 
-DEFAULT_DATASET_ROOT = "/home/zoyo/Projects/droid_preprocess_pipeline/droid_raw"
+DEFAULT_DATASET_ROOT = os.environ.get(
+    "DROID_DATASET_ROOT",
+    "/data1/zoyo/projects/droid_test1/test1",
+)
 MAX_CAMERAS = 6  # 预留的最大相机槽位数
 
 sam3: SAM3Annotator | None = None
+SAM3_CHECKPOINT_PATH = os.environ.get("SAM3_CHECKPOINT_PATH", "").strip() or None
 
 # 每种 mask 类型的颜色（RGB）
 MASK_COLORS = {
@@ -91,7 +96,7 @@ def get_sam3() -> SAM3Annotator:
     global sam3
     if sam3 is None:
         gr.Info("正在加载 SAM3 模型，首次启动需要一些时间...")
-        sam3 = SAM3Annotator()
+        sam3 = SAM3Annotator(checkpoint_path=SAM3_CHECKPOINT_PATH)
         gr.Info("SAM3 模型加载完成！")
     return sam3
 
