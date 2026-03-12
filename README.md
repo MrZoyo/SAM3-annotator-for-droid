@@ -85,7 +85,7 @@ PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
   "setuptools<81" \
   "sam3 @ git+https://github.com/facebookresearch/sam3.git" \
   einops psutil scipy decord pycocotools \
-  "gradio>=5.0,<6.0" "numpy>=1.26,<2" Pillow
+  "gradio==5.50.0" "numpy>=1.26,<2" Pillow
 ```
 
 首次运行会从 HuggingFace 下载 SAM3 模型权重（`facebook/sam3`，约 3.5GB）。

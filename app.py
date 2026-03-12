@@ -724,6 +724,7 @@ def build_app():
 
     with gr.Blocks(
         title="DROID SAM3 视频分割标注工具",
+        theme=gr.themes.Soft(),
     ) as app:
         gr.Markdown("# DROID SAM3 视频分割标注工具")
 
@@ -991,4 +992,4 @@ if __name__ == "__main__":
     get_sam3()
     print("SAM3 模型加载完成！")
     app = build_app()
-    app.launch(server_name="0.0.0.0", server_port=7860, theme=gr.themes.Soft())
+    app.launch(server_name="0.0.0.0", server_port=7860)
