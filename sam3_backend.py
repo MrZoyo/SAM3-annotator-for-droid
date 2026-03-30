@@ -10,17 +10,71 @@ SAM3 使用 session-based API:
 坐标系说明:
   SAM3 内部将所有帧 resize 到 1008×1008。rel_coordinates=True 时，
   点坐标应为 (x/orig_w, y/orig_h) 归一化到 [0,1]，内部乘以 1008 映射。
-  我们接受原始像素坐标，在 add_points 中自动归一化。
+我们接受原始像素坐标，在 add_points 中自动归一化。
 """
+
+from pathlib import Path
 
 import torch
 import numpy as np
+from huggingface_hub import constants as hf_constants
 from sam3.model.sam3_video_predictor import Sam3VideoPredictor
+
+HF_SAM3_MODEL_ID = "facebook/sam3"
+HF_SAM3_CKPT_NAME = "sam3.pt"
+
+
+def _find_repo_checkpoint() -> str | None:
+    """优先使用仓库自带 checkpoints/sam3.pt。"""
+    repo_ckpt = Path(__file__).resolve().parent / "checkpoints" / HF_SAM3_CKPT_NAME
+    if repo_ckpt.is_file():
+        return str(repo_ckpt)
+    return None
+
+
+def _find_hf_cached_checkpoint() -> str | None:
+    """检查 Hugging Face 缓存目录里是否已有 facebook/sam3 的权重。"""
+    hub_cache = Path(hf_constants.HF_HUB_CACHE).expanduser()
+    snapshot_root = hub_cache / f"models--{HF_SAM3_MODEL_ID.replace('/', '--')}" / "snapshots"
+    if not snapshot_root.is_dir():
+        return None
+
+    for ckpt_path in sorted(snapshot_root.glob(f"*/{HF_SAM3_CKPT_NAME}"), reverse=True):
+        if ckpt_path.is_file():
+            return str(ckpt_path)
+    return None
+
+
+def resolve_checkpoint_path(checkpoint_path: str | None = None) -> str | None:
+    """解析 checkpoint 路径。
+
+    优先级：
+    1. 显式传入/环境变量指定的路径
+    2. 仓库 checkpoints/sam3.pt
+    3. Hugging Face 缓存目录中的 facebook/sam3/sam3.pt
+    4. 返回 None，由 sam3 内部执行下载
+    """
+    if checkpoint_path is not None:
+        return checkpoint_path
+
+    repo_ckpt = _find_repo_checkpoint()
+    if repo_ckpt is not None:
+        print(f"使用仓库本地 SAM3 权重: {repo_ckpt}")
+        return repo_ckpt
+
+    hf_ckpt = _find_hf_cached_checkpoint()
+    if hf_ckpt is not None:
+        print(f"使用 Hugging Face 缓存中的 SAM3 权重: {hf_ckpt}")
+        return hf_ckpt
+
+    print("未找到本地或 Hugging Face 缓存中的 SAM3 权重，将尝试在线下载。")
+    return None
 
 
 class SAM3Annotator:
     def __init__(self, checkpoint_path: str | None = None):
-        self.predictor = Sam3VideoPredictor(checkpoint_path=checkpoint_path)
+        resolved_checkpoint_path = resolve_checkpoint_path(checkpoint_path)
+        self.predictor = Sam3VideoPredictor(checkpoint_path=resolved_checkpoint_path)
         self.session_id: str | None = None
 
     def _get_state(self):

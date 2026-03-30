@@ -15,11 +15,13 @@ from data_utils import (
     delete_saved_masks,
     get_frame_count,
     get_frames_dir,
+    get_heatmap_status,
     get_saved_status,
     is_episode_valid,
     list_cameras,
     list_episodes,
     load_frame,
+    merge_masks_to_heatmap,
     overlay_mask,
     read_lang,
     save_lang,
@@ -216,14 +218,16 @@ def format_export_status(episode_name: str) -> str:
     if not cameras:
         return f"Episode: {episode_name}\n未检测到相机"
     status = get_saved_status(ep_path)
+    hm_status = get_heatmap_status(ep_path)
 
     valid = is_episode_valid(ep_path)
     valid_str = "✅ 可用" if valid else "❌ 不可用"
 
     # 表头
+    hm_col = "heatmap"
     col_w = 8
     cam_w = max(len(c) for c in cameras) + 2
-    header = f"{'视角':<{cam_w}}" + "".join(f"{mt:^{col_w}}" for mt in MASK_TYPES)
+    header = f"{'视角':<{cam_w}}" + "".join(f"{mt:^{col_w}}" for mt in MASK_TYPES) + f"{hm_col:^{col_w + 2}}"
     sep = "-" * len(header)
     lines = [f"Episode: {episode_name}  [{valid_str}]", "", header, sep]
     for cam in cameras:
@@ -231,6 +235,8 @@ def format_export_status(episode_name: str) -> str:
         for mt in MASK_TYPES:
             check = "  ✅  " if status.get(cam, {}).get(mt) else "  ❌  "
             row += f"{check:^{col_w}}"
+        hm_check = "  ✅  " if hm_status.get(cam) else "  ❌  "
+        row += f"{hm_check:^{col_w + 2}}"
         lines.append(row)
     return "\n".join(lines)
 
@@ -353,6 +359,9 @@ def on_validity_change(episode_name, validity):
         return format_export_status(episode_name)
     ep_path = _get_ep_path(episode_name)
     valid = validity == "可用"
+    old_valid = is_episode_valid(ep_path)
+    if valid == old_valid:
+        return format_export_status(episode_name)
     set_episode_valid(ep_path, valid)
     status = "可用" if valid else "不可用"
     gr.Info(f"已标记为 {status}")
@@ -493,27 +502,34 @@ def on_delete_last_point(episode_name, frame_idx):
     return img, format_points_info()
 
 
+_session_lock = threading.Lock()
 _session_init_thread: threading.Thread | None = None
 _session_version = 0  # 每次请求新 session 时递增，过期线程不生效
+_session_key: tuple[str, str] = ("", "")  # 当前 session 对应的 (episode, camera)
 
 
 def _init_session_sync(episode_name, camera, version: int):
     """同步初始化 SAM3 session（在后台线程中调用）。"""
+    global _session_key
     ep_path = _get_ep_path(episode_name)
     annotator = get_sam3()
-    annotator.init_video(str(get_frames_dir(ep_path, camera)))
-    # 只有版本号匹配时才标记完成（防止旧线程覆盖新状态）
-    if version == _session_version:
+    with _session_lock:
+        # 再次检查版本号，避免已被更新的请求覆盖
+        if version != _session_version:
+            return
+        annotator.init_video(str(get_frames_dir(ep_path, camera)))
         current_state["session_initialized"] = True
+        _session_key = (episode_name, camera)
 
 
 def _ensure_session_async(episode_name, camera):
     """异步初始化 SAM3 session，立即返回不阻塞。"""
     global _session_init_thread, _session_version
-    if current_state["session_initialized"]:
+    if current_state["session_initialized"] and _session_key == (episode_name, camera):
         return
     # 递增版本号，使任何正在运行的旧线程失效
     _session_version += 1
+    current_state["session_initialized"] = False
     version = _session_version
     _session_init_thread = threading.Thread(
         target=_init_session_sync,
@@ -524,12 +540,13 @@ def _ensure_session_async(episode_name, camera):
 
 
 def _ensure_session(episode_name, camera):
-    """确保 SAM3 session 已初始化（同步等待）。"""
+    """确保 SAM3 session 已初始化且匹配当前 episode+camera（同步等待）。"""
     global _session_init_thread
     # 如果后台线程正在加载，等待完成
     if _session_init_thread is not None and _session_init_thread.is_alive():
         _session_init_thread.join()
-    if not current_state["session_initialized"]:
+    # 如果 session 不匹配或未初始化，重新初始化
+    if not current_state["session_initialized"] or _session_key != (episode_name, camera):
         _init_session_sync(episode_name, camera, _session_version)
 
 
@@ -590,9 +607,12 @@ def on_track(episode_name, frame_idx):
     camera = current_state["camera"]
 
     # 每次追踪都重新初始化 session，确保干净的状态
-    annotator = get_sam3()
-    annotator.init_video(str(get_frames_dir(ep_path, camera)))
-    current_state["session_initialized"] = True
+    with _session_lock:
+        annotator = get_sam3()
+        annotator.init_video(str(get_frames_dir(ep_path, camera)))
+        current_state["session_initialized"] = True
+        global _session_key
+        _session_key = (episode_name, camera)
     orig_w, orig_h = _get_image_size(episode_name, camera)
 
     # 将所有帧上的所有类型的点都 add_prompt 给 SAM3
@@ -687,6 +707,17 @@ def on_delete_saved_masks(episode_name):
         gr.Info(f"已删除 {camera} 的 mask: {', '.join(deleted)}")
     else:
         gr.Info(f"{camera} 没有已保存的 mask")
+    return format_export_status(episode_name)
+
+
+def on_merge_heatmap(episode_name):
+    """合成 heatmap：将已保存的 mask 合并为 .npz 并生成可视化。"""
+    if not episode_name:
+        gr.Warning("请先选择数据集")
+        return format_export_status(episode_name)
+    ep_path = _get_ep_path(episode_name)
+    result = merge_masks_to_heatmap(ep_path)
+    gr.Info(f"Heatmap 合成完成！\n{result}")
     return format_export_status(episode_name)
 
 
@@ -840,6 +871,7 @@ def build_app():
 
                 with gr.Row():
                     btn_save_mask = gr.Button("保存所有 Mask", variant="primary")
+                    btn_merge_heatmap = gr.Button("合成 Heatmap", variant="secondary")
                     btn_next_cam = gr.Button("下一个视角 →")
 
         # ── 绑定事件 ─────────────────────────────────────────────────────────
@@ -970,6 +1002,11 @@ def build_app():
         # 保存 mask 后自动刷新导出状态
         btn_save_mask.click(
             on_save_masks,
+            inputs=[episode_dropdown],
+            outputs=[export_status],
+        )
+        btn_merge_heatmap.click(
+            on_merge_heatmap,
             inputs=[episode_dropdown],
             outputs=[export_status],
         )

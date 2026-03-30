@@ -3,15 +3,14 @@
 对于每个相机的每一帧，读取 pick/place/push/pull/press 五个目录下的 mask PNG，
 合并为一个 .npz，每个键对应一种操作类型，值为 (H, W) 的 uint8 数组 (0/1)。
 
+自动适配两种数据集格式：
+- stereo (DROID): mask/{camera}/left/{type}/ → heatmap/{camera}/left/
+- mono (单目):    mask/{camera}/{type}/      → heatmap/{camera}/
+
 用法:
     python merge_masks.py /data1/yaoxuran/press_one_button_demo/episode_00000
 
-输入目录结构:
-    {episode}/mask/{camera}/left/pick/00000.png ...
-
-输出:
-    {episode}/heatmap/{camera}/left/00000.npz
-    读取: data = np.load("00000.npz"); data["pick"]  # (H, W), 0/1
+读取: data = np.load("00000.npz"); data["pick"]  # (H, W), 0/1
 """
 
 import argparse
@@ -23,6 +22,14 @@ from PIL import Image
 MASK_TYPES = ["pick", "place", "push", "pull", "press"]
 
 
+def _detect_mask_format(mask_root: Path) -> str:
+    """检测 mask 目录的格式：stereo (有 left 子目录) 或 mono。"""
+    for d in mask_root.iterdir():
+        if d.is_dir() and (d / "left").is_dir():
+            return "stereo"
+    return "mono"
+
+
 def merge_episode(episode_path: str):
     ep = Path(episode_path)
     mask_root = ep / "mask"
@@ -30,24 +37,36 @@ def merge_episode(episode_path: str):
         print(f"未找到 mask 目录: {mask_root}")
         return
 
+    fmt = _detect_mask_format(mask_root)
+
     # 检测相机
-    cameras = sorted(
-        d.name for d in mask_root.iterdir()
-        if d.is_dir() and (d / "left").is_dir()
-    )
+    if fmt == "stereo":
+        cameras = sorted(
+            d.name for d in mask_root.iterdir()
+            if d.is_dir() and (d / "left").is_dir()
+        )
+    else:
+        cameras = sorted(
+            d.name for d in mask_root.iterdir()
+            if d.is_dir()
+        )
     if not cameras:
         print(f"未找到任何相机目录: {mask_root}")
         return
 
     for cam in cameras:
-        left_dir = mask_root / cam / "left"
-        out_dir = ep / "heatmap" / cam / "left"
+        if fmt == "stereo":
+            types_parent = mask_root / cam / "left"
+            out_dir = ep / "heatmap" / cam / "left"
+        else:
+            types_parent = mask_root / cam
+            out_dir = ep / "heatmap" / cam
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # 收集所有帧文件名（取所有类型的并集）
         all_frames: set[str] = set()
         for mt in MASK_TYPES:
-            mt_dir = left_dir / mt
+            mt_dir = types_parent / mt
             if mt_dir.is_dir():
                 all_frames.update(p.stem for p in mt_dir.glob("*.png"))
 
@@ -61,7 +80,7 @@ def merge_episode(episode_path: str):
         for frame_name in sorted_frames:
             masks = {}
             for mt in MASK_TYPES:
-                png_path = left_dir / mt / f"{frame_name}.png"
+                png_path = types_parent / mt / f"{frame_name}.png"
                 if png_path.exists():
                     img = np.array(Image.open(png_path).convert("L"))
                     masks[mt] = (img > 127).astype(np.uint8)

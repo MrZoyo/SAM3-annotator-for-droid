@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 MASK_TYPES = ["pick", "place", "push", "pull", "press"]
 
@@ -18,16 +18,39 @@ MASK_TYPE_CN = {
 }
 
 
+def detect_format(episode_path: str) -> str:
+    """检测 episode 的数据集格式。
+
+    返回 "stereo"（DROID 立体双目）或 "mono"（单目）。
+    stereo: rgb_stereo_valid/{camera}/left/*.png
+    mono:   rgb/{camera}/*.png
+    """
+    ep = Path(episode_path)
+    if (ep / "rgb_stereo_valid").is_dir():
+        return "stereo"
+    if (ep / "rgb").is_dir():
+        return "mono"
+    return "unknown"
+
+
 def list_cameras(episode_path: str) -> list[str]:
     """自动检测 episode 下的相机目录列表。"""
-    stereo_dir = Path(episode_path) / "rgb_stereo_valid"
-    if not stereo_dir.is_dir():
-        return []
-    return sorted(
-        d.name
-        for d in stereo_dir.iterdir()
-        if d.is_dir() and (d / "left").is_dir()
-    )
+    fmt = detect_format(episode_path)
+    if fmt == "stereo":
+        stereo_dir = Path(episode_path) / "rgb_stereo_valid"
+        return sorted(
+            d.name
+            for d in stereo_dir.iterdir()
+            if d.is_dir() and (d / "left").is_dir()
+        )
+    elif fmt == "mono":
+        rgb_dir = Path(episode_path) / "rgb"
+        return sorted(
+            d.name
+            for d in rgb_dir.iterdir()
+            if d.is_dir() and any(d.glob("*.png"))
+        )
+    return []
 
 
 def list_episodes(dataset_root: str) -> list[str]:
@@ -38,14 +61,20 @@ def list_episodes(dataset_root: str) -> list[str]:
     episodes = sorted(
         d.name
         for d in root.iterdir()
-        if d.is_dir() and (d / "rgb_stereo_valid").is_dir()
+        if d.is_dir() and (
+            (d / "rgb_stereo_valid").is_dir() or (d / "rgb").is_dir()
+        )
     )
     return episodes
 
 
 def get_frames_dir(episode_path: str, camera: str) -> Path:
-    """获取指定 episode + camera 的帧目录。"""
-    return Path(episode_path) / "rgb_stereo_valid" / camera / "left"
+    """获取指定 episode + camera 的帧目录。自动适配 stereo/mono 格式。"""
+    fmt = detect_format(episode_path)
+    if fmt == "stereo":
+        return Path(episode_path) / "rgb_stereo_valid" / camera / "left"
+    else:
+        return Path(episode_path) / "rgb" / camera
 
 
 def load_frame_paths(episode_path: str, camera: str) -> list[Path]:
@@ -83,6 +112,15 @@ def save_lang(episode_path: str, text: str):
     lang_file.write_text(text.strip() + "\n", encoding="utf-8")
 
 
+def _mask_dir(episode_path: str, camera: str, mask_type: str) -> Path:
+    """获取 mask 保存目录，自动适配格式。"""
+    fmt = detect_format(episode_path)
+    if fmt == "stereo":
+        return Path(episode_path) / "mask" / camera / "left" / mask_type
+    else:
+        return Path(episode_path) / "mask" / camera / mask_type
+
+
 def save_masks(
     episode_path: str,
     camera: str,
@@ -97,7 +135,7 @@ def save_masks(
     保存为 0/255 的 PNG。没有 mask 的帧保存全零。
     返回保存目录路径。
     """
-    out_dir = Path(episode_path) / "mask" / camera / "left" / mask_type
+    out_dir = _mask_dir(episode_path, camera, mask_type)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 获取 mask 尺寸
@@ -141,7 +179,7 @@ def delete_saved_masks(episode_path: str, camera: str) -> list[str]:
 
     deleted = []
     for mt in MASK_TYPES:
-        mask_dir = Path(episode_path) / "mask" / camera / "left" / mt
+        mask_dir = _mask_dir(episode_path, camera, mt)
         if mask_dir.is_dir() and any(mask_dir.glob("*.png")):
             shutil.rmtree(mask_dir)
             deleted.append(mt)
@@ -155,7 +193,7 @@ def get_saved_status(episode_path: str) -> dict[str, dict[str, bool]]:
     for cam in cameras:
         status[cam] = {}
         for mt in MASK_TYPES:
-            mask_dir = Path(episode_path) / "mask" / cam / "left" / mt
+            mask_dir = _mask_dir(episode_path, cam, mt)
             status[cam][mt] = mask_dir.is_dir() and any(mask_dir.glob("*.png"))
     return status
 
@@ -271,3 +309,192 @@ def overlay_mask(
     out[border] = color
 
     return out
+
+
+# ── Heatmap 合成与可视化 ─────────────────────────────────────────────────────
+
+HEATMAP_COLORS = {
+    "pick": np.array([0.0, 200.0, 0.0], dtype=np.float32),
+    "place": np.array([220.0, 40.0, 40.0], dtype=np.float32),
+    "push": np.array([0.0, 128.0, 255.0], dtype=np.float32),
+    "pull": np.array([255.0, 165.0, 0.0], dtype=np.float32),
+    "press": np.array([200.0, 0.0, 200.0], dtype=np.float32),
+}
+HEATMAP_VIS_TILE_WIDTH = 320
+HEATMAP_VIS_ALPHA = 0.5
+
+
+def _heatmap_dir(episode_path: str, camera: str) -> Path:
+    """获取 heatmap 目录，自动适配格式。"""
+    fmt = detect_format(episode_path)
+    if fmt == "stereo":
+        return Path(episode_path) / "heatmap" / camera / "left"
+    else:
+        return Path(episode_path) / "heatmap" / camera
+
+
+def get_heatmap_status(episode_path: str) -> dict[str, bool]:
+    """检查已保存的 heatmap 状态。返回 {camera: bool}。"""
+    cameras = list_cameras(episode_path)
+    status = {}
+    for cam in cameras:
+        hm_dir = _heatmap_dir(episode_path, cam)
+        status[cam] = hm_dir.is_dir() and any(hm_dir.glob("*.npz"))
+    return status
+
+
+def merge_masks_to_heatmap(episode_path: str) -> str:
+    """将所有相机的 mask PNG 合并为 heatmap .npz，并生成可视化。
+
+    返回操作结果描述字符串。
+    """
+    ep = Path(episode_path)
+    cameras = list_cameras(episode_path)
+    if not cameras:
+        return "未检测到相机"
+
+    logs = []
+    for cam in cameras:
+        # 查找 mask 源目录
+        fmt = detect_format(episode_path)
+        if fmt == "stereo":
+            types_parent = ep / "mask" / cam / "left"
+        else:
+            types_parent = ep / "mask" / cam
+
+        if not types_parent.is_dir():
+            logs.append(f"  {cam}: 无 mask 目录，跳过")
+            continue
+
+        # 收集所有帧名
+        all_frames: set[str] = set()
+        for mt in MASK_TYPES:
+            mt_dir = types_parent / mt
+            if mt_dir.is_dir():
+                all_frames.update(p.stem for p in mt_dir.glob("*.png"))
+
+        if not all_frames:
+            logs.append(f"  {cam}: 无 mask 文件，跳过")
+            continue
+
+        out_dir = _heatmap_dir(episode_path, cam)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        sorted_frames = sorted(all_frames)
+        count = 0
+        for frame_name in sorted_frames:
+            masks = {}
+            h, w = 0, 0
+            for mt in MASK_TYPES:
+                png_path = types_parent / mt / f"{frame_name}.png"
+                if png_path.exists():
+                    img = np.array(Image.open(png_path).convert("L"))
+                    masks[mt] = (img > 127).astype(np.uint8)
+                    h, w = img.shape
+                else:
+                    masks[mt] = None
+
+            if h == 0 or w == 0:
+                continue
+
+            for mt in MASK_TYPES:
+                if masks[mt] is None:
+                    masks[mt] = np.zeros((h, w), dtype=np.uint8)
+
+            np.savez(out_dir / f"{frame_name}.npz", **masks)
+            count += 1
+
+        logs.append(f"  {cam}: {count} 帧 heatmap → {out_dir}")
+
+    # 生成可视化（所有相机的图都放在 heatmap_vis/ 下）
+    vis_dir = ep / "heatmap_vis"
+    vis_dir.mkdir(parents=True, exist_ok=True)
+    for cam in cameras:
+        _build_heatmap_vis_for_camera(episode_path, cam, vis_dir)
+
+    return "\n".join(logs) if logs else "无数据"
+
+
+def _select_4_frames(n: int) -> list[int]:
+    """从 n 帧中选 4 帧：首尾 + 中间均匀 2 帧。"""
+    if n <= 0:
+        return []
+    if n <= 4:
+        return list(range(n))
+    mid1 = n // 3
+    mid2 = 2 * n // 3
+    return [0, mid1, mid2, n - 1]
+
+
+def _build_heatmap_vis_for_camera(
+    episode_path: str, camera: str, vis_dir: Path
+):
+    """为单个相机生成 4 行 2 列对比图（左原图，右叠加 heatmap）。"""
+    hm_dir = _heatmap_dir(episode_path, camera)
+    frames_dir = get_frames_dir(episode_path, camera)
+
+    if not hm_dir.is_dir():
+        return
+
+    sorted_frames = sorted(p.stem for p in hm_dir.glob("*.npz"))
+    if not sorted_frames:
+        return
+
+    selected_indices = _select_4_frames(len(sorted_frames))
+    rows: list[tuple[Image.Image, Image.Image]] = []  # (原图, 叠加图)
+
+    for sel_idx in selected_indices:
+        frame_name = sorted_frames[sel_idx]
+        rgb_path = frames_dir / f"{frame_name}.png"
+        npz_path = hm_dir / f"{frame_name}.npz"
+        if not rgb_path.exists() or not npz_path.exists():
+            continue
+
+        rgb = np.array(Image.open(rgb_path).convert("RGB"))
+        data = np.load(npz_path)
+        label = f"f={frame_name}"
+        orig_img = _annotate_image(Image.fromarray(rgb), label)
+        overlay_img = _render_heatmap_overlay(rgb, data, f"heatmap f={frame_name}")
+        rows.append((orig_img, overlay_img))
+
+    if not rows:
+        return
+
+    # 拼接：4 行 x 2 列
+    tile_w = HEATMAP_VIS_TILE_WIDTH
+    first = rows[0][0]
+    tile_h = max(1, int(round(first.height * (tile_w / float(first.width)))))
+
+    canvas = Image.new("RGB", (tile_w * 2, tile_h * len(rows)), color=(24, 24, 24))
+    for row_idx, (orig, overlay) in enumerate(rows):
+        canvas.paste(orig.resize((tile_w, tile_h), resample=Image.BILINEAR), (0, row_idx * tile_h))
+        canvas.paste(overlay.resize((tile_w, tile_h), resample=Image.BILINEAR), (tile_w, row_idx * tile_h))
+
+    canvas.save(vis_dir / f"{camera}.png")
+
+
+def _annotate_image(image: Image.Image, label: str) -> Image.Image:
+    """在图片左上角添加标注文字。"""
+    draw = ImageDraw.Draw(image)
+    label_width = max(120, 8 * len(label) + 12)
+    draw.rectangle((0, 0, label_width, 24), fill=(0, 0, 0))
+    draw.text((6, 4), label, fill=(255, 255, 255))
+    return image
+
+
+def _render_heatmap_overlay(
+    rgb: np.ndarray, heatmap_data, label: str
+) -> Image.Image:
+    """将 heatmap 各通道以半透明彩色叠加到 RGB 图上。"""
+    overlay = rgb.astype(np.float32).copy()
+    for mt in MASK_TYPES:
+        if mt not in heatmap_data:
+            continue
+        mask = heatmap_data[mt] > 0
+        if not np.any(mask):
+            continue
+        color = HEATMAP_COLORS[mt]
+        overlay[mask] = (1.0 - HEATMAP_VIS_ALPHA) * overlay[mask] + HEATMAP_VIS_ALPHA * color
+
+    image = Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8), mode="RGB")
+    return _annotate_image(image, label)
